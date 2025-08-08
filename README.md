@@ -101,4 +101,157 @@ Refer to:
 
 ---
 
-Let me know if you’d like this formatted into a **Markdown file**, PDF, Confluence page format, or if you'd like to include **kubectl commands and Terraform automation tips**.
+Certainly, here's the continuation of your **Kubernetes Production Upgrade Notes** – specifically for performing **EKS upgrades using Terraform**.
+
+This section assumes you are managing EKS cluster, node groups, and add-ons via **Terraform**, and outlines a safe and production-grade upgrade approach.
+
+---
+
+## ☁️ Upgrading EKS via Terraform (IaC)
+
+Using Terraform ensures version-controlled, repeatable upgrades of EKS clusters, node groups, and add-ons. However, caution is required for production systems.
+
+---
+
+### ⚙️ High-Level Terraform Upgrade Flow
+
+1. **Update Terraform module versions**
+2. **Update desired Kubernetes version**
+3. **Apply changes for Control Plane (EKS Cluster)**
+4. **Apply changes for Node Groups**
+5. **Upgrade Add-ons via Terraform**
+6. **Post-upgrade validations**
+
+---
+
+### 🔧 1. Update Kubernetes Version in EKS Module
+
+```hcl
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = ">=19.0.0"  # Use latest stable version
+
+  cluster_name    = "your-cluster-name"
+  cluster_version = "1.33"
+
+  # ... rest of your EKS config
+}
+```
+
+> 🔍 Make sure to read the [terraform-aws-eks module changelog](https://github.com/terraform-aws-modules/terraform-aws-eks/blob/master/CHANGELOG.md) for any breaking changes.
+
+---
+
+### ⚙️ 2. Upgrade Managed Node Groups
+
+Update the Kubernetes version in each managed node group:
+
+```hcl
+  managed_node_groups = {
+    default = {
+      desired_size = 3
+      max_size     = 5
+      min_size     = 1
+
+      instance_types = ["t3.medium"]
+
+      ami_type       = "AL2_x86_64"
+      capacity_type  = "ON_DEMAND"
+      version        = "1.33"   # <- Target version
+    }
+  }
+```
+
+> ☝️ When applied, Terraform will perform a **rolling upgrade** of the nodes in the group.
+
+---
+
+### 🧩 3. Upgrade Core Add-ons (CoreDNS, kube-proxy, VPC CNI)
+
+Add the add-ons block or update their versions:
+
+```hcl
+module "eks" {
+  # ... existing config
+
+  eks_addons = {
+    coredns = {
+      addon_version     = "v1.11.1-eksbuild.1"
+      resolve_conflicts = "OVERWRITE"
+    }
+    kube-proxy = {
+      addon_version     = "v1.33.0-eksbuild.1"
+      resolve_conflicts = "OVERWRITE"
+    }
+    vpc-cni = {
+      addon_version     = "v1.18.1-eksbuild.1"
+      resolve_conflicts = "OVERWRITE"
+    }
+  }
+}
+```
+
+> ✅ Use the exact version from AWS-supported [EKS Add-on versions](https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html).
+
+---
+
+### 🚀 4. Terraform Commands
+
+```bash
+# Initialize any updated modules or providers
+terraform init
+
+# Review the planned changes (safe check)
+terraform plan
+
+# Apply the changes in stages
+terraform apply
+```
+
+> ✅ Apply in the following order:
+>
+> 1. Control Plane upgrade
+> 2. Node Group upgrade
+> 3. Add-on upgrade
+
+---
+
+### 🧪 5. Post-Upgrade Validation (after Terraform apply)
+
+* Confirm new Kubernetes version:
+
+  ```bash
+  kubectl version --short
+  ```
+* Check node group versions:
+
+  ```bash
+  kubectl get nodes -o wide
+  ```
+* Ensure pods are running fine:
+
+  ```bash
+  kubectl get pods -A
+  ```
+* Check add-on versions via console or:
+
+  ```bash
+  aws eks describe-addon --cluster-name <name> --addon-name <addon>
+  ```
+
+---
+
+## ✅ Best Practices for Terraform-Based EKS Upgrades
+
+| Step               | Description                                                                |
+| ------------------ | -------------------------------------------------------------------------- |
+| 🔒 Backup          | Ensure state file is backed up (e.g., remote S3 + DynamoDB)                |
+| 🔀 Staging         | Upgrade in lower environments before production                            |
+| 🔄 Rolling Updates | Ensure node groups use managed rollout strategy                            |
+| 💬 Communication   | Notify stakeholders before upgrade window                                  |
+| 🛡️ Monitoring     | Enable detailed monitoring via CloudWatch/Grafana during and after upgrade |
+| 🧪 Testing         | Run integration and smoke tests after each upgrade phase                   |
+
+---
+
+
