@@ -191,3 +191,4 @@ kubectl apply -f ingress.yaml
    dig api.mycompany.com
    ```
    Ensure it resolves
+<img width="677" height="698" alt="image" src="https://github.com/user-attachments/assets/471d1a3b-4591-424f-8a5c-f594992df86a" />
