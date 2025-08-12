@@ -1,6 +1,6 @@
 ---
 
-## **📓 Kubernetes Scaling & High Availability (HA) — Notes**
+## **Kubernetes Scaling & High Availability (HA) — Notes**
 
 **Purpose:**
 Scalability and HA ensure apps handle traffic spikes & failures **without downtime**.
