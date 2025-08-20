@@ -1,3 +1,237 @@
+Perfect 👍 — here’s a **printable runbook** for doing a **stable, safe EKS upgrade with Terraform in production**. It’s formatted as a step-by-step operational checklist you can actually use during a maintenance window.
+
+---
+
+# 📘 Runbook — Safe EKS Upgrade with Terraform (Production)
+
+---
+
+## 🎯 Goal
+
+Upgrade an EKS cluster managed by Terraform to a **stable, supported Kubernetes version** (latest patch in standard support). Ensure **zero/low downtime**, avoid deprecated APIs, and stay compliant with AWS/EKS support lifecycle.
+
+---
+
+## 🛠️ Prerequisites
+
+* **IAM Access**: Terraform runner role must have `eks:*`, `ec2:*`, `iam:*`, `ssm:*`.
+* **Terraform Backend**: Remote state (S3 + DynamoDB lock).
+* **Current Inventory**:
+
+  * Current EKS version (`kubectl version` or `aws eks describe-cluster`).
+  * Node group versions & AMIs.
+  * Add-ons: VPC CNI, CoreDNS, kube-proxy.
+  * Controllers: cluster-autoscaler, ingress, metrics-server.
+
+---
+
+## 🚦 Step 0 — Pre-flight Checks
+
+1. **Pick stable target version**
+
+   * Go to [EKS Kubernetes versions page](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html).
+   * Choose a minor that’s in **standard support**, and pin to the **latest patch**. Example: `1.33.4`.
+   * Update `variables.tf`:
+
+     ```hcl
+     variable "k8s_version" {
+       type    = string
+       default = "1.33.4"
+     }
+     ```
+
+2. **Scan manifests for deprecations**
+
+   ```bash
+   kubectl krew install deprecations
+   kubectl deprecations --k8s-version=1.33.4
+   ```
+
+   Or use `pluto detect-files` on Helm charts.
+
+3. **Validate readiness**
+
+   * Ensure **PodDisruptionBudgets** exist for critical workloads.
+   * Verify readiness/liveness probes.
+   * Scale up replicas for critical services if needed.
+
+4. **Backups**
+
+   * DB snapshots (RDS, EBS, EFS).
+   * Application state backup.
+
+---
+
+## 🔄 Step 1 — Upgrade Control Plane
+
+Edit Terraform:
+
+```hcl
+resource "aws_eks_cluster" "this" {
+  name    = var.name
+  version = var.k8s_version  # e.g. "1.33.4"
+  # other config...
+}
+```
+
+Apply control plane only:
+
+```bash
+terraform plan -target=aws_eks_cluster.this
+terraform apply -target=aws_eks_cluster.this
+```
+
+**Verification**:
+
+```bash
+kubectl version --short
+# Server Version: v1.33.4
+kubectl get nodes
+# Nodes still on old version → expected
+```
+
+---
+
+## 🔄 Step 2 — Upgrade Node Groups
+
+Update Terraform:
+
+```hcl
+resource "aws_eks_node_group" "workers" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "workers"
+  version         = var.k8s_version
+  update_config {
+    max_unavailable = 1
+  }
+  # optional for full pin:
+  # release_version = "1.33.x-yyyymmdd"
+}
+```
+
+Apply:
+
+```bash
+terraform plan -target=aws_eks_node_group.workers
+terraform apply -target=aws_eks_node_group.workers
+```
+
+**During rollout**:
+
+* Watch pods migrate:
+
+  ```bash
+  kubectl get pods -o wide
+  ```
+* Gracefully drain old nodes:
+
+  ```bash
+  kubectl cordon <old-node>
+  kubectl drain <old-node> --ignore-daemonsets --delete-emptydir-data
+  ```
+
+---
+
+## 🔄 Step 3 — Upgrade EKS Add-ons
+
+Pin versions in Terraform:
+
+```hcl
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name       = aws_eks_cluster.this.name
+  addon_name         = "vpc-cni"
+  addon_version      = "v1.16.1-eksbuild.1"
+  resolve_conflicts  = "OVERWRITE"
+}
+
+resource "aws_eks_addon" "coredns" {
+  cluster_name       = aws_eks_cluster.this.name
+  addon_name         = "coredns"
+  addon_version      = "v1.11.1-eksbuild.4"
+  resolve_conflicts  = "OVERWRITE"
+}
+
+resource "aws_eks_addon" "kube_proxy" {
+  cluster_name       = aws_eks_cluster.this.name
+  addon_name         = "kube-proxy"
+  addon_version      = "v1.33.4-eksbuild.2"
+  resolve_conflicts  = "OVERWRITE"
+}
+```
+
+Apply:
+
+```bash
+terraform plan
+terraform apply
+```
+
+**Verification**:
+
+```bash
+kubectl get pods -n kube-system
+```
+
+---
+
+## 🔄 Step 4 — Upgrade Helm-managed Controllers
+
+Example: Cluster Autoscaler:
+
+```bash
+helm repo update
+helm upgrade cluster-autoscaler autoscaler/cluster-autoscaler \
+  --namespace kube-system \
+  --set autoDiscovery.clusterName=<your-cluster> \
+  --version 9.35.0 # version tested for 1.33.x
+```
+
+Repeat for ingress controllers, metrics-server, CSI drivers.
+
+---
+
+## ✅ Step 5 — Post-upgrade Validation
+
+* Run smoke tests / e2e tests.
+* Monitor dashboards (latency, error rate, pod restarts).
+* Confirm API versions (`kubectl api-resources`).
+* Ensure all workloads are healthy:
+
+  ```bash
+  kubectl get pods --all-namespaces
+  ```
+
+---
+
+## 🔄 Rollback Strategy
+
+* **Control Plane**: Cannot roll back minor. Only option: create new cluster with previous version and migrate workloads (blue/green).
+* **Node Groups**: Roll back `version` or `release_version` in Terraform → apply.
+* **Add-ons**: Downgrade by re-pinning `addon_version`.
+* **Workloads**: Helm rollback or redeploy old chart version.
+
+---
+
+## 🔐 Key Best Practices
+
+* Pin versions (cluster minor+patch, nodegroup release\_version, addon\_version, Helm chart versions).
+* Never use `latest`.
+* Test in **staging** before prod.
+* Always upgrade **addons + controllers** immediately after control plane + nodes.
+* Keep upgrades within AWS standard support window (14 months).
+
+---
+
+# 🟢 Quick Memory Mnemonic
+
+**Plan → Control Plane → Nodes → Add-ons → Controllers → Validate**
+
+---
+
+Would you like me to also make a **Markdown cheatsheet version (1-page summary)** of this runbook that you can keep handy for interviews and on-call upgrades?
+
+
+
 ---
 
 # 🧱 Kubernetes – Production Upgrade Notes
